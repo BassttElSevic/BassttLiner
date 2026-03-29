@@ -1,0 +1,10 @@
+% 任务一，对人像进行预处理
+%  所谓图像配准，就是对同一场景的两幅或者多幅图像进行对准，比如很多人脸自动分析系统中的人
+%  脸归一化，作用就是使照片中的人脸大小一致并尽量处于相同的位置。
+%  图像配准需要以基准图像为参照，并通过一些基准点找到适当的空间变换关系系数，然后对输入图
+%  像进行相应的几何变换，从而实现与基准图像在这些基准点位置的对齐
+example_image = imread('D:\Linear_algebra\HUMANFACE\HUMANFACE\81011EB7D2C1CD813B7C6342A06C5019.jpg');
+imshow(example_image);
+PR = example_image(:,:,1);
+PG = example_image(:,:,2);
+PB = example_image()
