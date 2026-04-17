@@ -70,23 +70,29 @@ for i = 1:num_butterflies
     scale = 0.06 + rand() * 0.15;
     new_w = round(bg_w * scale);
     new_h = round(size(butterfly_orig,1) / size(butterfly_orig,2) * new_w);
-    b_resized = imresize(butterfly_extracted, [new_h, new_w]);
-    m_resized = imresize(double(mask), [new_h, new_w]);
+    b_resized = imresize_bilinear_mat(butterfly_extracted, [new_h, new_w], 'fill', 0);
 
+% mask 缩放建议用 double + fill=0，后续再二值化
+m_resized = imresize_bilinear_mat(double(mask), [new_h, new_w], 'fill', 0);
+m_resized = m_resized > 0.5;
     % (2) 旋转 —— ★ 关键：旋转时填充值设为 0（黑色），而不是白色
     angle = rand() * 60 - 30;  % 旋转角度 -30° ~ 30°，更自然
-    b_rotated = imrotate(b_resized, angle, 'bilinear', 'loose');
-    m_rotated = imrotate(m_resized, angle, 'bilinear', 'loose');
+   b_rotated = imrotate_matlab_linear(b_resized, angle, 'loose', true, 'fill', 0);
+
+% m_resized 是 double(mask) 这种0/1，旋转后仍会变成灰度（插值导致）
+m_rotated = imrotate_matlab_linear(uint8(255*m_resized), angle, 'loose', true, 'fill', 0);
+m_rotated = double(m_rotated) / 255;  % 回到0~1
+m_rotated = m_rotated > 0.5;          % 二值化
 
     % ★★★ 关键：旋转后新增的区域掩膜值为0，所以不会显示白色边框 ★★★
     % 将掩膜二值化（旋转插值后可能有中间值）
     m_rotated = m_rotated > 0.5;
 
     % (3) 随机水平翻转
-    if rand() > 0.5
-        b_rotated = fliplr(b_rotated);
-        m_rotated = fliplr(m_rotated);
-    end
+   if rand() > 0.5
+    b_rotated = flip_perm(b_rotated, 'lr');
+    m_rotated = flip_perm(m_rotated, 'lr');
+end
 
     % (4) 随机位置（平移）
     [bh, bw, ~] = size(b_rotated);
