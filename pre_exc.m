@@ -10,7 +10,8 @@
 % PB_of_example_image = example_image(:,:,3);
 % raw_gray_example_image = 0.299 * PR_of_example_image + 0.587 * PG_of_example_image + 0.114 * PB_of_example_image;
 
-file_list = dir('D:\Linear_algebra\HUMANFACE\HUMANFACE\*.jpg'); %批量化读取
+% file_list = dir('D:\Linear_algebra\HUMANFACE\HUMANFACE\*.jpg'); %批量化读取
+file_list = dir('D:\Linear_algebra\Face\Face_old\*.jpg');
 n = length(file_list);
 
 images = cell(1, n);
@@ -102,38 +103,71 @@ fprintf('\n共成功处理 %d / %d 张图片\n', valid_count, n);
 %% ---- 0. 在滤波代码之后继续执行 ----
 
 %% ---- 1. 创建检测器 ----
-faceDetector = vision.CascadeObjectDetector();
-eyeDetector  = vision.CascadeObjectDetector('EyePairBig');
+% faceDetector = vision.CascadeObjectDetector();
+% eyeDetector  = vision.CascadeObjectDetector('EyePairBig');
 
-%% ---- 2. 选择基准图 ----
-% 遍历找到第一张能成功检测到眼睛的图作为基准
-ref_idx = -1;
-ref_left_eye = [];
-ref_right_eye = [];
+eyeDetector = vision.CascadeObjectDetector('EyePairBig');
+eyeDetector.MinSize = [11 45];      % ✅ 修复：[height width]，宽度≥45
+eyeDetector.MergeThreshold = 3;
 
-for i = 1:valid_count
-    try
-        eye_bbox = step(eyeDetector, Gauss_filtered{i});
-        if ~isempty(eye_bbox)
-            eye_bbox = eye_bbox(1,:);
-            ref_left_eye  = [eye_bbox(1) + eye_bbox(3)*0.25, ...
-                             eye_bbox(2) + eye_bbox(4)*0.5];
-            ref_right_eye = [eye_bbox(1) + eye_bbox(3)*0.75, ...
-                             eye_bbox(2) + eye_bbox(4)*0.5];
-            ref_idx = i;
-            fprintf('✅ 选择图片 #%d 作为基准图\n', i);
-            break;
-        end
-    catch
-        continue;
-    end
-end
+% %% ---- 2. 选择基准图 ----
+% % 遍历找到第一张能成功检测到眼睛的图作为基准
+% ref_idx = -1;
+% ref_left_eye = [];
+% ref_right_eye = [];
+% 
+% % for i = 1:valid_count
+% %     try
+% %         eye_bbox = step(eyeDetector, Gauss_filtered{i});
+% %         if ~isempty(eye_bbox)
+% %             eye_bbox = eye_bbox(1,:);
+% %             ref_left_eye  = [eye_bbox(1) + eye_bbox(3)*0.25, ...
+% %                              eye_bbox(2) + eye_bbox(4)*0.5];
+% %             ref_right_eye = [eye_bbox(1) + eye_bbox(3)*0.75, ...
+% %                              eye_bbox(2) + eye_bbox(4)*0.5];
+% %             ref_idx = i;
+% %             fprintf('✅ 选择图片 #%d 作为基准图\n', i);
+% %             break;
+% %         end
+% %     catch
+% %         continue;
+% %     end
+% % end
+% % 
+% % if ref_idx == -1
+% %     error('❌ 所有图片都无法检测到眼睛，无法进行配准');
+% % end
+% 
+% % "D:\Linear_algebra\Face\Face_old\LUO.jpg
+% %ref_img = Gauss_filtered{'D:\Linear_algebra\Face\Face_old\LUO.jpg'};
+% 
+% % 假设 file_names 是记录了每张图文件名的元胞数组
+% idx = find(strcmp(file_names, 'LUO.jpg'));
+% ref_img = Gauss_filtered{idx};
+% 
+% ref_eye_dist   = norm(ref_right_eye - ref_left_eye);
+% ref_eye_angle  = atan2d(ref_right_eye(2) - ref_left_eye(2), ...
+%                         ref_right_eye(1) - ref_left_eye(1));
+% ref_eye_center = (ref_left_eye + ref_right_eye) / 2;
+% output_size    = size(ref_img);
+% 
+% fprintf('基准图眼睛中心: (%.1f, %.1f), 眼距: %.1f\n', ...
+%     ref_eye_center(1), ref_eye_center(2), ref_eye_dist);
 
-if ref_idx == -1
-    error('❌ 所有图片都无法检测到眼睛，无法进行配准');
-end
+ref_path = 'D:\Linear_algebra\Face\Face_old\LIU.jpg';
+ref_raw = imread(ref_path);
+gray_ref_raw = (0.299 * double(ref_raw(:,:,1))) + (0.587 * double(ref_raw(:,:,2))) + (0.114 * double(ref_raw(:,:,3)));
+ref_img = gray_ref_raw;
 
-ref_img = Gauss_filtered{ref_idx};
+eye_bbox = step(eyeDetector, uint8(ref_img));
+
+eye_bbox = eye_bbox(1,:);
+ref_left_eye  = [eye_bbox(1) + eye_bbox(3)*0.25, eye_bbox(2) + eye_bbox(4)*0.5];
+ref_right_eye = [eye_bbox(1) + eye_bbox(3)*0.75, eye_bbox(2) + eye_bbox(4)*0.5];
+ref_idx = 0;
+
+
+% ---- 下面这几行完全不用改 ----
 ref_eye_dist   = norm(ref_right_eye - ref_left_eye);
 ref_eye_angle  = atan2d(ref_right_eye(2) - ref_left_eye(2), ...
                         ref_right_eye(1) - ref_left_eye(1));
@@ -142,7 +176,6 @@ output_size    = size(ref_img);
 
 fprintf('基准图眼睛中心: (%.1f, %.1f), 眼距: %.1f\n', ...
     ref_eye_center(1), ref_eye_center(2), ref_eye_dist);
-
 %% ---- 3. 对所有图片进行配准 ----
 aligned_images = cell(1, valid_count);
 align_status = zeros(1, valid_count);  % 0=失败 1=成功 2=回退估计
