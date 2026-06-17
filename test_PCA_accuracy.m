@@ -75,9 +75,9 @@ for i = 1:num_images
         else
             continue;
         end
-        % 高斯滤波 + 缩放（与PCA.m一致）
+        % 高斯滤波 + 缩放（与PCA.m一致，去掉第二次滤波避免过度模糊）
         filtered = imgaussfilt(gray_img, 0.3);
-        resized = imgaussfilt(imresize(filtered, img_size));
+        resized = imresize(filtered, img_size);
         all_vectors(:, i) = double(resized(:));
         valid_indices = [valid_indices, i]; %#ok<AGROW>
     catch
@@ -99,7 +99,7 @@ X_all = all_vectors - mean_face;
 Y_all = P' * X_all;   % r × num_valid
 
 %% ===== 5. 随机划分训练集和测试集 =====
-rng('shuffle');  % 随机种子
+rng(42);  % 固定随机种子，保证结果可复现
 test_ratio = 0.3;  % 30%作为测试集
 
 % 按人分层抽样，确保每个人至少有1张在训练集
@@ -181,76 +181,232 @@ end
 accuracy_centroid_euclidean = correct_centroid_euclidean / num_test * 100;
 fprintf('类中心法 + 欧几里得距离准确率: %.2f%% (%d/%d)\n', accuracy_centroid_euclidean, correct_centroid_euclidean, num_test);
 
-%% ===== 7. k-NN 投票法 =====
-% 取k个最近邻，按人名多数投票决定分类结果
+%% ===== 7. k-NN 投票法（多个k值） =====
 fprintf('\n===== k-NN 投票法 =====\n');
 
-K = 5;  % k值，可根据数据量调整
-fprintf('k = %d\n', K);
+K_values = [1, 3, 5];  % 测试多个k值
 
-% 余弦相似度 k-NN
-correct_knn_cosine = 0;
+% 预计算训练集的范数（避免重复计算）
+norms_train = sqrt(sum(Y_train.^2, 1));
+
+% 存储各k值的结果
+accuracy_knn_cosine = zeros(length(K_values), 1);
+accuracy_knn_euclidean = zeros(length(K_values), 1);
+
+for ki = 1:length(K_values)
+    K = K_values(ki);
+    fprintf('\n--- k = %d ---\n', K);
+    
+    % 余弦相似度 k-NN
+    correct_knn_cos = 0;
+    for i = 1:num_test
+        test_vec = Y_test(:, i);
+        norm_test = norm(test_vec);
+        if norm_test < 1e-10
+            continue;
+        end
+        cos_sim = (test_vec' * Y_train) ./ (norm_test * norms_train + 1e-10);
+        
+        k_actual = min(K, length(cos_sim));
+        [~, sorted_idx] = sort(cos_sim, 'descend');
+        top_k_idx = sorted_idx(1:k_actual);
+        top_k_labels = labels_train(top_k_idx);
+        
+        % 多数投票
+        vote_names = unique(top_k_labels);
+        vote_counts = zeros(length(vote_names), 1);
+        for v = 1:length(vote_names)
+            vote_counts(v) = sum(strcmp(top_k_labels, vote_names{v}));
+        end
+        [~, winner_idx] = max(vote_counts);
+        predicted_label = vote_names{winner_idx};
+        
+        if strcmp(predicted_label, labels_test{i})
+            correct_knn_cos = correct_knn_cos + 1;
+        end
+    end
+    accuracy_knn_cosine(ki) = correct_knn_cos / num_test * 100;
+    fprintf('k-NN(k=%d) + 余弦相似度准确率: %.2f%% (%d/%d)\n', K, accuracy_knn_cosine(ki), correct_knn_cos, num_test);
+    
+    % 欧几里得距离 k-NN
+    correct_knn_euc = 0;
+    for i = 1:num_test
+        test_vec = Y_test(:, i);
+        diff = Y_train - test_vec;
+        distances = sqrt(sum(diff.^2, 1));
+        
+        k_actual = min(K, length(distances));
+        [~, sorted_idx] = sort(distances, 'ascend');
+        top_k_idx = sorted_idx(1:k_actual);
+        top_k_labels = labels_train(top_k_idx);
+        
+        % 多数投票
+        vote_names = unique(top_k_labels);
+        vote_counts = zeros(length(vote_names), 1);
+        for v = 1:length(vote_names)
+            vote_counts(v) = sum(strcmp(top_k_labels, vote_names{v}));
+        end
+        [~, winner_idx] = max(vote_counts);
+        predicted_label = vote_names{winner_idx};
+        
+        if strcmp(predicted_label, labels_test{i})
+            correct_knn_euc = correct_knn_euc + 1;
+        end
+    end
+    accuracy_knn_euclidean(ki) = correct_knn_euc / num_test * 100;
+    fprintf('k-NN(k=%d) + 欧几里得距离准确率: %.2f%% (%d/%d)\n', K, accuracy_knn_euclidean(ki), correct_knn_euc, num_test);
+end
+
+%% ===== 8. 加权 k-NN（距离加权投票） =====
+fprintf('\n===== 加权 k-NN（距离反比加权） =====\n');
+
+K_weighted = 5;
+fprintf('k = %d\n', K_weighted);
+
+% 余弦相似度加权 k-NN
+correct_wknn_cos = 0;
 for i = 1:num_test
     test_vec = Y_test(:, i);
     norm_test = norm(test_vec);
     if norm_test < 1e-10
         continue;
     end
-    norms_train = sqrt(sum(Y_train.^2, 1));
     cos_sim = (test_vec' * Y_train) ./ (norm_test * norms_train + 1e-10);
     
-    % 取前K个最相似的邻居
-    k_actual = min(K, length(cos_sim));
-    [~, sorted_idx] = sort(cos_sim, 'descend');
+    k_actual = min(K_weighted, length(cos_sim));
+    [sorted_sim, sorted_idx] = sort(cos_sim, 'descend');
     top_k_idx = sorted_idx(1:k_actual);
     top_k_labels = labels_train(top_k_idx);
+    top_k_weights = max(sorted_sim(1:k_actual), 0);  % 相似度作为权重
     
-    % 多数投票
+    % 加权投票
     vote_names = unique(top_k_labels);
-    vote_counts = zeros(length(vote_names), 1);
+    vote_scores = zeros(length(vote_names), 1);
     for v = 1:length(vote_names)
-        vote_counts(v) = sum(strcmp(top_k_labels, vote_names{v}));
+        mask = strcmp(top_k_labels, vote_names{v});
+        vote_scores(v) = sum(top_k_weights(mask));
     end
-    [~, winner_idx] = max(vote_counts);
+    [~, winner_idx] = max(vote_scores);
     predicted_label = vote_names{winner_idx};
     
     if strcmp(predicted_label, labels_test{i})
-        correct_knn_cosine = correct_knn_cosine + 1;
+        correct_wknn_cos = correct_wknn_cos + 1;
     end
 end
-accuracy_knn_cosine = correct_knn_cosine / num_test * 100;
-fprintf('k-NN + 余弦相似度准确率: %.2f%% (%d/%d)\n', accuracy_knn_cosine, correct_knn_cosine, num_test);
+accuracy_wknn_cosine = correct_wknn_cos / num_test * 100;
+fprintf('加权k-NN + 余弦相似度准确率: %.2f%% (%d/%d)\n', accuracy_wknn_cosine, correct_wknn_cos, num_test);
 
-% 欧几里得距离 k-NN
-correct_knn_euclidean = 0;
+% 欧几里得距离加权 k-NN
+correct_wknn_euc = 0;
 for i = 1:num_test
     test_vec = Y_test(:, i);
     diff = Y_train - test_vec;
     distances = sqrt(sum(diff.^2, 1));
     
-    % 取前K个最近的邻居
-    k_actual = min(K, length(distances));
-    [~, sorted_idx] = sort(distances, 'ascend');
+    k_actual = min(K_weighted, length(distances));
+    [sorted_dist, sorted_idx] = sort(distances, 'ascend');
     top_k_idx = sorted_idx(1:k_actual);
     top_k_labels = labels_train(top_k_idx);
+    top_k_weights = 1 ./ (sorted_dist(1:k_actual) + 1e-10);  % 距离反比作为权重
     
-    % 多数投票
+    % 加权投票
     vote_names = unique(top_k_labels);
-    vote_counts = zeros(length(vote_names), 1);
+    vote_scores = zeros(length(vote_names), 1);
     for v = 1:length(vote_names)
-        vote_counts(v) = sum(strcmp(top_k_labels, vote_names{v}));
+        mask = strcmp(top_k_labels, vote_names{v});
+        vote_scores(v) = sum(top_k_weights(mask));
     end
-    [~, winner_idx] = max(vote_counts);
+    [~, winner_idx] = max(vote_scores);
     predicted_label = vote_names{winner_idx};
     
     if strcmp(predicted_label, labels_test{i})
-        correct_knn_euclidean = correct_knn_euclidean + 1;
+        correct_wknn_euc = correct_wknn_euc + 1;
     end
 end
-accuracy_knn_euclidean = correct_knn_euclidean / num_test * 100;
-fprintf('k-NN + 欧几里得距离准确率: %.2f%% (%d/%d)\n', accuracy_knn_euclidean, correct_knn_euclidean, num_test);
+accuracy_wknn_euclidean = correct_wknn_euc / num_test * 100;
+fprintf('加权k-NN + 欧几里得距离准确率: %.2f%% (%d/%d)\n', accuracy_wknn_euclidean, correct_wknn_euc, num_test);
 
-%% ===== 8. 结果汇总 =====
+%% ===== 9. 去除前几个主成分（去光照）的识别实验 =====
+fprintf('\n===== 去除前N个主成分（去光照干扰）实验 =====\n');
+
+skip_values = [1, 2, 3];  % 分别去掉前1、2、3个主成分
+
+for si = 1:length(skip_values)
+    skip_n = skip_values(si);
+    if skip_n >= size(Y_all, 1)
+        continue;
+    end
+    
+    % 去掉前skip_n个成分
+    Y_train_skip = Y_train(skip_n+1:end, :);
+    Y_test_skip = Y_test(skip_n+1:end, :);
+    
+    % 用1-NN + 欧几里得距离测试
+    correct_skip = 0;
+    for i = 1:num_test
+        test_vec = Y_test_skip(:, i);
+        diff = Y_train_skip - test_vec;
+        distances = sqrt(sum(diff.^2, 1));
+        [~, best_idx] = min(distances);
+        if strcmp(labels_train{best_idx}, labels_test{i})
+            correct_skip = correct_skip + 1;
+        end
+    end
+    acc_skip = correct_skip / num_test * 100;
+    fprintf('去掉前%d个主成分 + 1-NN + 欧几里得: %.2f%% (%d/%d)\n', skip_n, acc_skip, correct_skip, num_test);
+end
+
+%% ===== 10. 不同主成分数量的影响实验 =====
+fprintf('\n===== 不同PCA维度下的识别准确率 =====\n');
+
+% 测试不同保留维度（10~全部，含原始的93维作为参考）
+r_full = size(Y_all, 1);
+dim_values = unique([10, 20, 30, 50, min(70, r_full), min(93, r_full), r_full]);
+dim_values = dim_values(dim_values <= r_full);
+
+for di = 1:length(dim_values)
+    dim = dim_values(di);
+    Y_train_dim = Y_train(1:dim, :);
+    Y_test_dim = Y_test(1:dim, :);
+    
+    % 1-NN + 欧几里得距离
+    correct_dim = 0;
+    for i = 1:num_test
+        test_vec = Y_test_dim(:, i);
+        diff = Y_train_dim - test_vec;
+        distances = sqrt(sum(diff.^2, 1));
+        [~, best_idx] = min(distances);
+        if strcmp(labels_train{best_idx}, labels_test{i})
+            correct_dim = correct_dim + 1;
+        end
+    end
+    acc_dim = correct_dim / num_test * 100;
+    fprintf('保留前%d维 + 1-NN + 欧几里得: %.2f%% (%d/%d)\n', dim, acc_dim, correct_dim, num_test);
+end
+
+%% ===== 11. 马氏距离（对角近似）分类 =====
+fprintf('\n===== 马氏距离（对角近似）最近邻 =====\n');
+
+% 使用PCA特征值作为各维度方差的估计
+lambda_diag = lambda_sorted(1:size(Y_train,1));
+% 避免除以过小的值
+lambda_diag(lambda_diag < 1e-6) = 1e-6;
+
+correct_mahal = 0;
+for i = 1:num_test
+    test_vec = Y_test(:, i);
+    diff = Y_train - test_vec;
+    % 马氏距离 = sqrt(sum((diff_j)^2 / lambda_j))
+    mahal_dist = sqrt(sum(diff.^2 ./ lambda_diag, 1));
+    [~, best_idx] = min(mahal_dist);
+    if strcmp(labels_train{best_idx}, labels_test{i})
+        correct_mahal = correct_mahal + 1;
+    end
+end
+accuracy_mahal = correct_mahal / num_test * 100;
+fprintf('马氏距离(对角近似) + 1-NN 准确率: %.2f%% (%d/%d)\n', accuracy_mahal, correct_mahal, num_test);
+
+%% ===== 12. 结果汇总 =====
 fprintf('\n========================================\n');
 fprintf('       人脸识别准确率测试结果汇总\n');
 fprintf('========================================\n');
@@ -258,10 +414,21 @@ fprintf('PCA保留主成分数: %d\n', size(P, 2));
 fprintf('训练集样本数: %d\n', length(train_idx));
 fprintf('测试集样本数: %d\n', num_test);
 fprintf('人数: %d\n', length(unique_names_valid));
-fprintf('k-NN 的 k 值: %d\n', K);
+fprintf('随机种子: 42（固定）\n');
 fprintf('----------------------------------------\n');
-fprintf('类中心法 + 余弦相似度准确率:   %.2f%%\n', accuracy_centroid_cosine);
-fprintf('类中心法 + 欧几里得距离准确率: %.2f%%\n', accuracy_centroid_euclidean);
-fprintf('k-NN + 余弦相似度准确率:       %.2f%%\n', accuracy_knn_cosine);
-fprintf('k-NN + 欧几里得距离准确率:     %.2f%%\n', accuracy_knn_euclidean);
+fprintf('【类中心法】\n');
+fprintf('  余弦相似度准确率:   %.2f%%\n', accuracy_centroid_cosine);
+fprintf('  欧几里得距离准确率: %.2f%%\n', accuracy_centroid_euclidean);
+fprintf('----------------------------------------\n');
+fprintf('【k-NN 投票法】\n');
+for ki = 1:length(K_values)
+    fprintf('  k=%d 余弦: %.2f%%  欧几里得: %.2f%%\n', K_values(ki), accuracy_knn_cosine(ki), accuracy_knn_euclidean(ki));
+end
+fprintf('----------------------------------------\n');
+fprintf('【加权 k-NN (k=%d)】\n', K_weighted);
+fprintf('  余弦相似度准确率:   %.2f%%\n', accuracy_wknn_cosine);
+fprintf('  欧几里得距离准确率: %.2f%%\n', accuracy_wknn_euclidean);
+fprintf('----------------------------------------\n');
+fprintf('【马氏距离 1-NN】\n');
+fprintf('  准确率: %.2f%%\n', accuracy_mahal);
 fprintf('========================================\n');
