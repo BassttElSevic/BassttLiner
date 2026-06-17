@@ -76,8 +76,8 @@ for i = 1:n
         % 高斯滤波
         Gauss_filtered{valid_count} = imgaussfilt(RAW_gray_images{valid_count}, 0.3);
         
-        % 尺寸统一化，加滤波
-        Resized_images{valid_count} = imgaussfilt(imresize(Gauss_filtered{valid_count}, [60, 60]));
+        % 尺寸统一化（去掉第二次高斯滤波，避免过度模糊丢失细节）
+        Resized_images{valid_count} = imresize(Gauss_filtered{valid_count}, [60, 60]);
         % 写入D:\Linear_algebra\Face\Face_neo
         [~, name, ~] = fileparts(file_list(i).name);
         out_path = fullfile(output_folder, [name, '.jpg']);
