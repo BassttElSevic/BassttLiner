@@ -11,6 +11,15 @@
 %   - 【新增】子空间法（每类一个子空间）
 %   - 【新增】软投票集成法（多方法融合）
 %   - 【新增】局部子空间法（L-NN + 局部PCA重建）
+% 诊断分析：
+%   - 数据集分布诊断（每人样本数统计）
+%   - 每人识别准确率分析
+%   - 混淆分析（最容易混淆的人脸对）
+%   - 类内/类间距离分析
+%   - PCA特征值谱分析
+%   - 最优skip+维度组合搜索
+%   - 重建误差分析
+%   - 图像质量与多样性指标
 % 注意：运行此脚本前，需先运行 PCA.m 以获得 mean_face, P, Y, file_list, valid_count, skip_pc, lambda_sorted 等变量
 
 %% ===== 0. 检查工作空间中是否存在PCA所需变量 =====
@@ -632,7 +641,334 @@ end
 accuracy_centroid_w = correct_centroid_w / num_test * 100;
 fprintf('类中心 + 白化欧几里得准确率: %.2f%% (%d/%d)\n', accuracy_centroid_w, correct_centroid_w, num_test);
 
-%% ===== 17. 结果汇总 =====
+%% ===== 17. 【新增】数据集分布诊断 =====
+fprintf('\n===== 数据集分布诊断 =====\n');
+
+% 每人样本数统计
+samples_per_person = zeros(length(unique_names_valid), 1);
+train_per_person = zeros(length(unique_names_valid), 1);
+test_per_person = zeros(length(unique_names_valid), 1);
+for k = 1:length(unique_names_valid)
+    name = unique_names_valid{k};
+    samples_per_person(k) = sum(strcmp(labels, name));
+    train_per_person(k) = sum(strcmp(labels_train, name));
+    test_per_person(k) = sum(strcmp(labels_test, name));
+end
+
+fprintf('每人总样本数: 最少=%d, 最多=%d, 平均=%.1f, 中位数=%.1f\n', ...
+    min(samples_per_person), max(samples_per_person), ...
+    mean(samples_per_person), median(samples_per_person));
+fprintf('每人训练样本: 最少=%d, 最多=%d, 平均=%.1f\n', ...
+    min(train_per_person), max(train_per_person), mean(train_per_person));
+fprintf('每人测试样本: 最少=%d, 最多=%d, 平均=%.1f\n', ...
+    min(test_per_person), max(test_per_person), mean(test_per_person));
+
+% 列出样本数较少的人（可能影响识别率）
+fprintf('\n样本数 <= 5 的人:\n');
+for k = 1:length(unique_names_valid)
+    if samples_per_person(k) <= 5
+        fprintf('  %s: 总%d张 (训练%d, 测试%d)\n', ...
+            unique_names_valid{k}, samples_per_person(k), ...
+            train_per_person(k), test_per_person(k));
+    end
+end
+
+%% ===== 18. 【新增】每人识别准确率分析 =====
+fprintf('\n===== 每人识别准确率分析（1-NN 欧几里得）=====\n');
+
+person_correct = zeros(length(unique_names_valid), 1);
+person_total = zeros(length(unique_names_valid), 1);
+
+for i = 1:num_test
+    test_vec = Y_test(:, i);
+    diff = Y_train - test_vec;
+    distances = sqrt(sum(diff.^2, 1));
+    [~, best_idx] = min(distances);
+    
+    % 找到这个人在unique_names_valid中的索引
+    true_class = find(strcmp(unique_names_valid, labels_test{i}));
+    person_total(true_class) = person_total(true_class) + 1;
+    
+    if strcmp(labels_train{best_idx}, labels_test{i})
+        person_correct(true_class) = person_correct(true_class) + 1;
+    end
+end
+
+% 计算每人准确率并排序
+person_accuracy = zeros(length(unique_names_valid), 1);
+for k = 1:length(unique_names_valid)
+    if person_total(k) > 0
+        person_accuracy(k) = person_correct(k) / person_total(k) * 100;
+    else
+        person_accuracy(k) = -1;  % 没有测试样本
+    end
+end
+
+[sorted_acc, sort_idx] = sort(person_accuracy, 'descend');
+fprintf('\n识别率最高的5人:\n');
+count = 0;
+for k = 1:length(sort_idx)
+    if sorted_acc(k) < 0, continue; end
+    count = count + 1;
+    idx = sort_idx(k);
+    fprintf('  %s: %.1f%% (%d/%d) [训练%d张]\n', ...
+        unique_names_valid{idx}, sorted_acc(k), ...
+        person_correct(idx), person_total(idx), train_per_person(idx));
+    if count >= 5, break; end
+end
+
+fprintf('\n识别率最低的5人:\n');
+count = 0;
+for k = length(sort_idx):-1:1
+    if sorted_acc(k) < 0, continue; end
+    count = count + 1;
+    idx = sort_idx(k);
+    fprintf('  %s: %.1f%% (%d/%d) [训练%d张]\n', ...
+        unique_names_valid{idx}, sorted_acc(k), ...
+        person_correct(idx), person_total(idx), train_per_person(idx));
+    if count >= 5, break; end
+end
+
+% 完全识别正确和完全错误的人数
+fully_correct = sum(person_accuracy == 100 & person_total > 0);
+fully_wrong = sum(person_accuracy == 0 & person_total > 0);
+fprintf('\n完全正确的人数: %d/%d\n', fully_correct, sum(person_total > 0));
+fprintf('完全错误的人数: %d/%d\n', fully_wrong, sum(person_total > 0));
+
+%% ===== 19. 【新增】混淆分析（最容易混淆的人脸对）=====
+fprintf('\n===== 混淆分析（最容易被误判为谁）=====\n');
+
+% 构建简易混淆矩阵
+num_classes = length(unique_names_valid);
+confusion = zeros(num_classes, num_classes);
+
+for i = 1:num_test
+    test_vec = Y_test(:, i);
+    diff = Y_train - test_vec;
+    distances = sqrt(sum(diff.^2, 1));
+    [~, best_idx] = min(distances);
+    
+    true_class = find(strcmp(unique_names_valid, labels_test{i}));
+    pred_class = find(strcmp(unique_names_valid, labels_train{best_idx}));
+    confusion(true_class, pred_class) = confusion(true_class, pred_class) + 1;
+end
+
+% 找出最大的非对角线混淆对
+confusion_offdiag = confusion;
+for k = 1:num_classes
+    confusion_offdiag(k, k) = 0;
+end
+
+fprintf('最容易混淆的5对人脸:\n');
+for pair = 1:5
+    [max_val, linear_idx] = max(confusion_offdiag(:));
+    if max_val == 0, break; end
+    [row, col] = ind2sub([num_classes, num_classes], linear_idx);
+    fprintf('  "%s" 被误判为 "%s": %d 次\n', ...
+        unique_names_valid{row}, unique_names_valid{col}, max_val);
+    confusion_offdiag(row, col) = 0;  % 标记已输出
+end
+
+%% ===== 20. 【新增】类内/类间距离分析 =====
+fprintf('\n===== 类内距离 vs 类间距离分析 =====\n');
+
+% 在PCA空间中计算类内和类间平均距离
+intra_dists = [];
+inter_dists = [];
+
+for k = 1:length(unique_names_valid)
+    name = unique_names_valid{k};
+    person_mask = strcmp(labels_train, name);
+    Y_person = Y_train(:, person_mask);
+    n_p = size(Y_person, 2);
+    
+    % 类内距离：同一人不同样本之间的距离
+    if n_p >= 2
+        for a = 1:n_p-1
+            for b = a+1:n_p
+                d = norm(Y_person(:, a) - Y_person(:, b));
+                intra_dists = [intra_dists; d]; %#ok<AGROW>
+            end
+        end
+    end
+end
+
+% 类间距离：不同人的类中心之间的距离
+for k1 = 1:num_classes-1
+    for k2 = k1+1:num_classes
+        d = norm(centroids(:, k1) - centroids(:, k2));
+        inter_dists = [inter_dists; d]; %#ok<AGROW>
+    end
+end
+
+fprintf('类内平均距离: %.2f (std=%.2f, min=%.2f, max=%.2f)\n', ...
+    mean(intra_dists), std(intra_dists), min(intra_dists), max(intra_dists));
+fprintf('类间平均距离（中心间）: %.2f (std=%.2f, min=%.2f, max=%.2f)\n', ...
+    mean(inter_dists), std(inter_dists), min(inter_dists), max(inter_dists));
+fprintf('类间/类内距离比: %.3f（越大越容易区分，理想值 > 2）\n', ...
+    mean(inter_dists) / mean(intra_dists));
+
+% 找类间距离最小的几对（最难区分的）
+[sorted_inter, inter_idx] = sort(inter_dists, 'ascend');
+fprintf('\n类间距离最小的3对（最难区分）:\n');
+pair_count = 0;
+pair_idx = 0;
+for k1 = 1:num_classes-1
+    for k2 = k1+1:num_classes
+        pair_idx = pair_idx + 1;
+        if any(inter_idx(1:3) == pair_idx)
+            pair_count = pair_count + 1;
+            fprintf('  "%s" vs "%s": 中心距离 = %.2f\n', ...
+                unique_names_valid{k1}, unique_names_valid{k2}, ...
+                norm(centroids(:, k1) - centroids(:, k2)));
+        end
+        if pair_count >= 3, break; end
+    end
+    if pair_count >= 3, break; end
+end
+
+%% ===== 21. 【新增】PCA特征值谱分析 =====
+fprintf('\n===== PCA特征值谱分析 =====\n');
+
+if exist('lambda_sorted', 'var')
+    total_var = sum(lambda_sorted);
+    cum_var = cumsum(lambda_sorted) / total_var * 100;
+    
+    fprintf('总方差: %.2e\n', total_var);
+    fprintf('前1个主成分累积方差贡献: %.2f%%\n', cum_var(1));
+    fprintf('前5个主成分累积方差贡献: %.2f%%\n', cum_var(min(5, length(cum_var))));
+    fprintf('前10个主成分累积方差贡献: %.2f%%\n', cum_var(min(10, length(cum_var))));
+    fprintf('前20个主成分累积方差贡献: %.2f%%\n', cum_var(min(20, length(cum_var))));
+    fprintf('前40个主成分累积方差贡献: %.2f%%\n', cum_var(min(40, length(cum_var))));
+    fprintf('前70个主成分累积方差贡献: %.2f%%\n', cum_var(min(70, length(cum_var))));
+    
+    % 特征值衰减速率
+    fprintf('\n特征值衰减（前10个）:\n');
+    for ev = 1:min(10, length(lambda_sorted))
+        fprintf('  λ_%d = %.4e (占比 %.2f%%)\n', ev, lambda_sorted(ev), ...
+            lambda_sorted(ev)/total_var*100);
+    end
+    
+    % 有效维度估计（特征值 > 平均值的维度数）
+    avg_lambda = mean(lambda_sorted(lambda_sorted > 0));
+    effective_dim = sum(lambda_sorted > avg_lambda);
+    fprintf('\n有效维度估计（λ > 平均特征值）: %d\n', effective_dim);
+    fprintf('达到95%%方差所需维度: %d\n', find(cum_var >= 95, 1, 'first'));
+    fprintf('达到99%%方差所需维度: %d\n', find(cum_var >= 99, 1, 'first'));
+else
+    fprintf('未检测到 lambda_sorted 变量，跳过特征值分析。\n');
+end
+
+%% ===== 22. 【新增】最优维度+skip组合搜索 =====
+fprintf('\n===== 最优 skip_pc + 保留维度 组合搜索 =====\n');
+
+skip_candidates = [0, 1, 2, 3, 5];
+dim_candidates = [20, 30, 40, 50, 70];
+best_combo_acc = 0;
+best_skip = 0;
+best_dim = 0;
+
+% 需要完整的特征向量矩阵Q
+if exist('Q', 'var')
+    for si = 1:length(skip_candidates)
+        for di = 1:length(dim_candidates)
+            s = skip_candidates(si);
+            d = dim_candidates(di);
+            if s + d > size(Q, 2), continue; end
+            
+            P_test = Q(:, s+1 : s+d);
+            Y_tr_test = P_test' * (all_vectors(:, train_idx) - mean_face);
+            Y_te_test = P_test' * (all_vectors(:, test_idx) - mean_face);
+            
+            correct_combo = 0;
+            for i = 1:num_test
+                diff_c = Y_tr_test - Y_te_test(:, i);
+                dists_c = sum(diff_c.^2, 1);
+                [~, best_c] = min(dists_c);
+                if strcmp(labels_train{best_c}, labels_test{i})
+                    correct_combo = correct_combo + 1;
+                end
+            end
+            acc_combo = correct_combo / num_test * 100;
+            fprintf('  skip=%d, dim=%d: %.2f%%\n', s, d, acc_combo);
+            
+            if acc_combo > best_combo_acc
+                best_combo_acc = acc_combo;
+                best_skip = s;
+                best_dim = d;
+            end
+        end
+    end
+    fprintf('最优组合: skip=%d, dim=%d, 准确率=%.2f%%\n', best_skip, best_dim, best_combo_acc);
+else
+    fprintf('未检测到 Q 变量，跳过组合搜索。\n');
+end
+
+%% ===== 23. 【新增】重建误差分析 =====
+fprintf('\n===== 重建误差分析 =====\n');
+
+% 计算PCA重建误差（原始空间中）
+recon_errors = zeros(num_test, 1);
+for i = 1:num_test
+    x_orig = all_vectors(:, test_idx(i)) - mean_face;
+    x_recon = P * (P' * x_orig);  % 投影再重建
+    recon_errors(i) = norm(x_orig - x_recon) / norm(x_orig) * 100;
+end
+
+fprintf('测试集平均相对重建误差: %.2f%%\n', mean(recon_errors));
+fprintf('重建误差范围: %.2f%% ~ %.2f%%\n', min(recon_errors), max(recon_errors));
+fprintf('重建误差标准差: %.2f%%\n', std(recon_errors));
+
+% 按正确/错误分类样本的重建误差对比
+correct_mask_recon = false(num_test, 1);
+for i = 1:num_test
+    test_vec = Y_test(:, i);
+    diff_r = Y_train - test_vec;
+    distances_r = sum(diff_r.^2, 1);
+    [~, best_r] = min(distances_r);
+    if strcmp(labels_train{best_r}, labels_test{i})
+        correct_mask_recon(i) = true;
+    end
+end
+
+if any(correct_mask_recon)
+    fprintf('正确分类样本的平均重建误差: %.2f%%\n', mean(recon_errors(correct_mask_recon)));
+end
+if any(~correct_mask_recon)
+    fprintf('错误分类样本的平均重建误差: %.2f%%\n', mean(recon_errors(~correct_mask_recon)));
+end
+fprintf('（重建误差高 → 该人脸可能不在训练集主要变差空间内）\n');
+
+%% ===== 24. 【新增】图像质量/多样性指标 =====
+fprintf('\n===== 图像质量与多样性指标 =====\n');
+
+% 计算训练集每人的类内方差（代表姿态/光照多样性）
+fprintf('每人类内方差（PCA空间，反映训练多样性）:\n');
+class_variance = zeros(length(unique_names_valid), 1);
+for k = 1:length(unique_names_valid)
+    name = unique_names_valid{k};
+    person_mask = strcmp(labels_train, name);
+    Y_person = Y_train(:, person_mask);
+    if size(Y_person, 2) > 1
+        class_variance(k) = mean(var(Y_person, 0, 2));
+    else
+        class_variance(k) = 0;
+    end
+end
+
+[sorted_var, var_idx] = sort(class_variance, 'descend');
+fprintf('  类内方差最大（最多样）的3人:\n');
+for k = 1:min(3, length(var_idx))
+    fprintf('    %s: 方差=%.2e (样本%d张)\n', ...
+        unique_names_valid{var_idx(k)}, sorted_var(k), train_per_person(var_idx(k)));
+end
+fprintf('  类内方差最小（最单一）的3人:\n');
+for k = length(var_idx):-1:max(1, length(var_idx)-2)
+    fprintf('    %s: 方差=%.2e (样本%d张)\n', ...
+        unique_names_valid{var_idx(k)}, class_variance(var_idx(k)), train_per_person(var_idx(k)));
+end
+
+%% ===== 25. 结果汇总 =====
 fprintf('\n========================================\n');
 fprintf('       人脸识别准确率测试结果汇总\n');
 fprintf('========================================\n');
@@ -640,6 +976,7 @@ fprintf('PCA保留主成分数: %d（跳过前%d个）\n', size(P, 2), skip_pc);
 fprintf('训练集样本数: %d\n', length(train_idx));
 fprintf('测试集样本数: %d\n', num_test);
 fprintf('人数: %d\n', length(unique_names_valid));
+fprintf('每人平均样本数: %.1f（最少%d，最多%d）\n', mean(samples_per_person), min(samples_per_person), max(samples_per_person));
 fprintf('随机种子: 42（固定）\n');
 fprintf('----------------------------------------\n');
 fprintf('【类中心法】\n');
@@ -670,4 +1007,13 @@ fprintf('  准确率: %.2f%%\n', accuracy_whiten);
 fprintf('----------------------------------------\n');
 fprintf('【软投票集成法】\n');
 fprintf('  准确率: %.2f%%\n', accuracy_ensemble);
+fprintf('----------------------------------------\n');
+fprintf('【诊断指标】\n');
+fprintf('  类间/类内距离比: %.3f\n', mean(inter_dists) / mean(intra_dists));
+fprintf('  完全正确人数: %d/%d\n', fully_correct, sum(person_total > 0));
+fprintf('  完全错误人数: %d/%d\n', fully_wrong, sum(person_total > 0));
+fprintf('  平均重建误差: %.2f%%\n', mean(recon_errors));
+if exist('Q', 'var')
+    fprintf('  最优组合: skip=%d, dim=%d → %.2f%%\n', best_skip, best_dim, best_combo_acc);
+end
 fprintf('========================================\n');
