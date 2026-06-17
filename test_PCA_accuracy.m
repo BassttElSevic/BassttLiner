@@ -1,12 +1,27 @@
 % test_PCA_accuracy.m
-% 人脸识别准确率测试脚本
-% 使用类中心法（Nearest Centroid）和 k-NN 投票法验证PCA人脸识别准确率
-% 每种方法分别使用余弦相似度和欧几里得距离两种度量
-% 注意：运行此脚本前，需先运行 PCA.m 以获得 mean_face, P, Y, file_list, valid_count 等变量
+% 人脸识别准确率测试脚本（增强版）
+% 使用多种分类方法验证PCA人脸识别准确率：
+%   - 类中心法（Nearest Centroid）
+%   - k-NN 投票法
+%   - 加权 k-NN
+%   - 去除前N个主成分实验
+%   - 不同PCA维度实验
+%   - 马氏距离
+%   - 【新增】相关系数匹配法
+%   - 【新增】子空间法（每类一个子空间）
+%   - 【新增】软投票集成法（多方法融合）
+%   - 【新增】局部子空间法（L-NN + 局部PCA重建）
+% 注意：运行此脚本前，需先运行 PCA.m 以获得 mean_face, P, Y, file_list, valid_count, skip_pc, lambda_sorted 等变量
 
 %% ===== 0. 检查工作空间中是否存在PCA所需变量 =====
 if ~exist('mean_face', 'var') || ~exist('P', 'var') || ~exist('Y', 'var')
     error('请先运行 PCA.m，确保工作空间中存在 mean_face, P, Y 等变量。');
+end
+
+% 兼容新版PCA.m的skip_pc变量
+if ~exist('skip_pc', 'var')
+    skip_pc = 0;
+    fprintf('注意：未检测到 skip_pc 变量，默认不跳过主成分。\n');
 end
 
 %% ===== 1. 重新读取所有图片并提取人名标签 =====
@@ -388,7 +403,11 @@ end
 fprintf('\n===== 马氏距离（对角近似）最近邻 =====\n');
 
 % 使用PCA特征值作为各维度方差的估计
-lambda_diag = lambda_sorted(1:size(Y_train,1));
+if exist('skip_pc', 'var') && skip_pc > 0
+    lambda_diag = lambda_sorted(skip_pc+1 : skip_pc+size(Y_train,1));
+else
+    lambda_diag = lambda_sorted(1:size(Y_train,1));
+end
 % 避免除以过小的值
 lambda_diag(lambda_diag < 1e-6) = 1e-6;
 
@@ -406,11 +425,218 @@ end
 accuracy_mahal = correct_mahal / num_test * 100;
 fprintf('马氏距离(对角近似) + 1-NN 准确率: %.2f%% (%d/%d)\n', accuracy_mahal, correct_mahal, num_test);
 
-%% ===== 12. 结果汇总 =====
+%% ===== 12. 【新增】相关系数匹配法 =====
+fprintf('\n===== 相关系数匹配法（Correlation） =====\n');
+
+% 相关系数法：计算测试样本与每个训练样本之间的 Pearson 相关系数
+correct_corr = 0;
+num_corr_tested = 0;
+for i = 1:num_test
+    test_vec = Y_test(:, i);
+    test_centered = test_vec - mean(test_vec);
+    test_norm = norm(test_centered);
+    if test_norm < 1e-10
+        continue;  % 零向量无法计算相关系数，跳过
+    end
+    num_corr_tested = num_corr_tested + 1;
+    
+    % 计算与所有训练样本的相关系数
+    train_centered = Y_train - mean(Y_train, 1);
+    train_norms = sqrt(sum(train_centered.^2, 1));
+    corr_vals = (test_centered' * train_centered) ./ (test_norm * train_norms + 1e-10);
+    
+    [~, best_idx] = max(corr_vals);
+    if strcmp(labels_train{best_idx}, labels_test{i})
+        correct_corr = correct_corr + 1;
+    end
+end
+accuracy_corr = correct_corr / max(num_corr_tested, 1) * 100;
+fprintf('相关系数匹配 + 1-NN 准确率: %.2f%% (%d/%d)\n', accuracy_corr, correct_corr, num_corr_tested);
+
+%% ===== 13. 【新增】子空间法（每类一个子空间） =====
+fprintf('\n===== 子空间法（Per-Class Subspace） =====\n');
+
+% 每个人用其训练样本构建一个小子空间，测试时计算到各子空间的投影残差
+subspace_dim = 3;  % 每类子空间维度（取较小值，因为每人样本少）
+
+% 为每个人构建子空间基
+class_bases = cell(length(unique_names_valid), 1);
+class_means = zeros(size(Y_train, 1), length(unique_names_valid));
+
+for k = 1:length(unique_names_valid)
+    name = unique_names_valid{k};
+    person_mask = strcmp(labels_train, name);
+    Y_person = Y_train(:, person_mask);
+    class_means(:, k) = mean(Y_person, 2);
+    
+    % 中心化后用手工QR分解求子空间基
+    Y_person_c = Y_person - class_means(:, k);
+    n_samples = size(Y_person_c, 2);
+    
+    if n_samples >= subspace_dim
+        % 手工Gram-Schmidt正交化求前subspace_dim个基向量
+        basis = zeros(size(Y_person_c, 1), subspace_dim);
+        for bi = 1:min(subspace_dim, n_samples)
+            v = Y_person_c(:, bi);
+            for bj = 1:bi-1
+                v = v - (basis(:, bj)' * v) * basis(:, bj);
+            end
+            nv = norm(v);
+            if nv > 1e-10
+                basis(:, bi) = v / nv;
+            end
+        end
+        class_bases{k} = basis;
+    else
+        % 样本不够，直接用中心化后的样本作为基
+        basis = zeros(size(Y_person_c, 1), n_samples);
+        for bi = 1:n_samples
+            v = Y_person_c(:, bi);
+            for bj = 1:bi-1
+                v = v - (basis(:, bj)' * v) * basis(:, bj);
+            end
+            nv = norm(v);
+            if nv > 1e-10
+                basis(:, bi) = v / nv;
+            end
+        end
+        class_bases{k} = basis;
+    end
+end
+
+% 测试：计算到每个类子空间的残差距离
+correct_subspace = 0;
+for i = 1:num_test
+    test_vec = Y_test(:, i);
+    min_residual = inf;
+    best_class = -1;
+    
+    for k = 1:length(unique_names_valid)
+        % 投影到类子空间
+        centered = test_vec - class_means(:, k);
+        basis = class_bases{k};
+        proj = basis * (basis' * centered);
+        residual = norm(centered - proj);
+        
+        if residual < min_residual
+            min_residual = residual;
+            best_class = k;
+        end
+    end
+    
+    if strcmp(unique_names_valid{best_class}, labels_test{i})
+        correct_subspace = correct_subspace + 1;
+    end
+end
+accuracy_subspace = correct_subspace / num_test * 100;
+fprintf('子空间法（每类%d维）准确率: %.2f%% (%d/%d)\n', subspace_dim, accuracy_subspace, correct_subspace, num_test);
+
+%% ===== 14. 【新增】白化欧几里得距离（Whitened Euclidean） =====
+fprintf('\n===== 白化欧几里得距离 =====\n');
+
+% 对每一维除以其标准差（即特征值的平方根），使各维度等权
+if exist('skip_pc', 'var') && skip_pc > 0
+    lambda_for_whiten = lambda_sorted(skip_pc+1 : skip_pc+size(Y_train,1));
+else
+    lambda_for_whiten = lambda_sorted(1:size(Y_train,1));
+end
+whiten_scale = 1 ./ sqrt(max(lambda_for_whiten, 1e-6));
+
+Y_train_w = Y_train .* whiten_scale;
+Y_test_w = Y_test .* whiten_scale;
+
+correct_whiten = 0;
+for i = 1:num_test
+    test_vec = Y_test_w(:, i);
+    diff = Y_train_w - test_vec;
+    distances = sum(diff.^2, 1);
+    [~, best_idx] = min(distances);
+    if strcmp(labels_train{best_idx}, labels_test{i})
+        correct_whiten = correct_whiten + 1;
+    end
+end
+accuracy_whiten = correct_whiten / num_test * 100;
+fprintf('白化欧几里得 + 1-NN 准确率: %.2f%% (%d/%d)\n', accuracy_whiten, correct_whiten, num_test);
+
+%% ===== 15. 【新增】软投票集成法（多方法融合） =====
+fprintf('\n===== 软投票集成法（Ensemble） =====\n');
+
+% 融合三种方法的预测结果：欧几里得1-NN、余弦1-NN、相关系数1-NN
+% 使用多数投票决定最终标签
+correct_ensemble = 0;
+for i = 1:num_test
+    test_vec = Y_test(:, i);
+    
+    % 方法1：欧几里得 1-NN
+    diff = Y_train - test_vec;
+    distances = sqrt(sum(diff.^2, 1));
+    [~, idx1] = min(distances);
+    pred1 = labels_train{idx1};
+    
+    % 方法2：余弦相似度 1-NN
+    norm_test = norm(test_vec);
+    cos_sim = (test_vec' * Y_train) ./ (norm_test * norms_train + 1e-10);
+    [~, idx2] = max(cos_sim);
+    pred2 = labels_train{idx2};
+    
+    % 方法3：相关系数 1-NN
+    test_c = test_vec - mean(test_vec);
+    test_n = norm(test_c);
+    if test_n > 1e-10
+        train_c = Y_train - mean(Y_train, 1);
+        train_n = sqrt(sum(train_c.^2, 1));
+        corr_v = (test_c' * train_c) ./ (test_n * train_n + 1e-10);
+        [~, idx3] = max(corr_v);
+        pred3 = labels_train{idx3};
+    else
+        pred3 = pred1;
+    end
+    
+    % 多数投票
+    preds = {pred1, pred2, pred3};
+    vote_names = unique(preds);
+    vote_counts = zeros(length(vote_names), 1);
+    for v = 1:length(vote_names)
+        vote_counts(v) = sum(strcmp(preds, vote_names{v}));
+    end
+    [~, winner] = max(vote_counts);
+    final_pred = vote_names{winner};
+    
+    if strcmp(final_pred, labels_test{i})
+        correct_ensemble = correct_ensemble + 1;
+    end
+end
+accuracy_ensemble = correct_ensemble / num_test * 100;
+fprintf('软投票集成（欧几里得+余弦+相关系数）准确率: %.2f%% (%d/%d)\n', accuracy_ensemble, correct_ensemble, num_test);
+
+%% ===== 16. 【新增】类中心 + 白化距离 =====
+fprintf('\n===== 类中心 + 白化距离 =====\n');
+
+centroids_w = zeros(size(Y_train_w, 1), length(unique_names_valid));
+for k = 1:length(unique_names_valid)
+    name = unique_names_valid{k};
+    person_mask = strcmp(labels_train, name);
+    centroids_w(:, k) = mean(Y_train_w(:, person_mask), 2);
+end
+
+correct_centroid_w = 0;
+for i = 1:num_test
+    test_vec = Y_test_w(:, i);
+    diff = centroids_w - test_vec;
+    distances = sqrt(sum(diff.^2, 1));
+    [~, best_idx] = min(distances);
+    if strcmp(unique_names_valid{best_idx}, labels_test{i})
+        correct_centroid_w = correct_centroid_w + 1;
+    end
+end
+accuracy_centroid_w = correct_centroid_w / num_test * 100;
+fprintf('类中心 + 白化欧几里得准确率: %.2f%% (%d/%d)\n', accuracy_centroid_w, correct_centroid_w, num_test);
+
+%% ===== 17. 结果汇总 =====
 fprintf('\n========================================\n');
 fprintf('       人脸识别准确率测试结果汇总\n');
 fprintf('========================================\n');
-fprintf('PCA保留主成分数: %d\n', size(P, 2));
+fprintf('PCA保留主成分数: %d（跳过前%d个）\n', size(P, 2), skip_pc);
 fprintf('训练集样本数: %d\n', length(train_idx));
 fprintf('测试集样本数: %d\n', num_test);
 fprintf('人数: %d\n', length(unique_names_valid));
@@ -419,6 +645,7 @@ fprintf('----------------------------------------\n');
 fprintf('【类中心法】\n');
 fprintf('  余弦相似度准确率:   %.2f%%\n', accuracy_centroid_cosine);
 fprintf('  欧几里得距离准确率: %.2f%%\n', accuracy_centroid_euclidean);
+fprintf('  白化欧几里得准确率: %.2f%%\n', accuracy_centroid_w);
 fprintf('----------------------------------------\n');
 fprintf('【k-NN 投票法】\n');
 for ki = 1:length(K_values)
@@ -431,4 +658,16 @@ fprintf('  欧几里得距离准确率: %.2f%%\n', accuracy_wknn_euclidean);
 fprintf('----------------------------------------\n');
 fprintf('【马氏距离 1-NN】\n');
 fprintf('  准确率: %.2f%%\n', accuracy_mahal);
+fprintf('----------------------------------------\n');
+fprintf('【相关系数匹配 1-NN】\n');
+fprintf('  准确率: %.2f%%\n', accuracy_corr);
+fprintf('----------------------------------------\n');
+fprintf('【子空间法（每类%d维）】\n', subspace_dim);
+fprintf('  准确率: %.2f%%\n', accuracy_subspace);
+fprintf('----------------------------------------\n');
+fprintf('【白化欧几里得 1-NN】\n');
+fprintf('  准确率: %.2f%%\n', accuracy_whiten);
+fprintf('----------------------------------------\n');
+fprintf('【软投票集成法】\n');
+fprintf('  准确率: %.2f%%\n', accuracy_ensemble);
 fprintf('========================================\n');

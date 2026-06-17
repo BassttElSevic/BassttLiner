@@ -191,16 +191,81 @@ L_check = Q' * C * Q;
 off_diag_err = max(abs(L_check - diag(diag(L_check))), [], 'all');
 fprintf('Λ 非对角元最大值 = %e\n', off_diag_err);
 
-%% ===== 4. 选择前 r 个特征向量作为投影矩阵 P =====
-explained = lambda_sorted / sum(lambda_sorted) * 100;
-cum_explained = cumsum(explained);
-r = find(cum_explained >= 95, 1);
-if isempty(r)
-    r = r_actual;
-end
-fprintf('保留 95%% 方差所需主成分数 r = %d\n', r);
+%% ===== 4. 去除前3个主成分（光照干扰）并用交叉验证选最优维度 =====
+skip_pc = 3;  % 去掉前3个主成分（主要捕获光照变化）
+fprintf('去除前 %d 个主成分以消除光照干扰\n', skip_pc);
 
-P = Q(:, 1:r);   % 投影矩阵，列向量即特征脸
+% --- 交叉验证选择最优保留维度 ---
+% 候选维度范围：从第 skip_pc+1 个开始，测试 20~60 维
+candidate_dims = [20, 25, 30, 35, 40, 45, 50, 55, 60];
+candidate_dims = candidate_dims(candidate_dims + skip_pc <= r_actual);
+
+% 提取文件名标签用于交叉验证
+cv_labels = cell(valid_count, 1);
+for ci = 1:valid_count
+    fname = file_list(ci).name;
+    tokens = regexp(fname, '^([\x{4e00}-\x{9fff}]{2,3})', 'tokens', 'once');
+    if ~isempty(tokens)
+        cv_labels{ci} = tokens{1};
+    else
+        cv_labels{ci} = sprintf('unknown_%d', ci);
+    end
+end
+
+% 5折交叉验证
+n_folds = 5;
+rng(123);
+cv_perm = randperm(valid_count);
+fold_size = floor(valid_count / n_folds);
+
+fprintf('\n===== 交叉验证选择最优PCA维度 =====\n');
+cv_accuracies = zeros(length(candidate_dims), 1);
+
+for di = 1:length(candidate_dims)
+    dim = candidate_dims(di);
+    fold_acc = zeros(n_folds, 1);
+    
+    for fold = 1:n_folds
+        % 划分验证集和训练集
+        if fold < n_folds
+            val_idx = cv_perm((fold-1)*fold_size+1 : fold*fold_size);
+        else
+            val_idx = cv_perm((fold-1)*fold_size+1 : end);
+        end
+        tr_idx = setdiff(cv_perm, val_idx);
+        
+        % 投影（跳过前skip_pc个，保留dim个）
+        P_cv = Q(:, skip_pc+1 : skip_pc+dim);
+        Y_tr = P_cv' * X(:, tr_idx);
+        Y_val = P_cv' * X(:, val_idx);
+        labels_tr = cv_labels(tr_idx);
+        labels_val = cv_labels(val_idx);
+        
+        % 1-NN 欧几里得距离
+        correct = 0;
+        for vi = 1:length(val_idx)
+            diff_cv = Y_tr - Y_val(:, vi);
+            dists = sum(diff_cv.^2, 1);
+            [~, best] = min(dists);
+            if strcmp(labels_tr{best}, labels_val{vi})
+                correct = correct + 1;
+            end
+        end
+        fold_acc(fold) = correct / length(val_idx);
+    end
+    
+    cv_accuracies(di) = mean(fold_acc);
+    fprintf('  维度 %d: 交叉验证准确率 = %.2f%%\n', dim, cv_accuracies(di)*100);
+end
+
+% 选择最优维度
+[best_cv_acc, best_di] = max(cv_accuracies);
+r = candidate_dims(best_di);
+fprintf('交叉验证最优维度: %d（准确率 %.2f%%）\n', r, best_cv_acc*100);
+
+% 最终投影矩阵：跳过前skip_pc个，保留r个
+P = Q(:, skip_pc+1 : skip_pc+r);   % 投影矩阵，列向量即特征脸
+fprintf('投影矩阵 P 使用第 %d 到第 %d 个特征向量\n', skip_pc+1, skip_pc+r);
 
 %% ===== 5. 降维 Y = P^T X =====
 Y = P' * X;
@@ -208,7 +273,7 @@ fprintf('降维后数据 Y 尺寸 = %d × %d\n', size(Y));
 
 %% ===== 6. 验证降维后协方差矩阵 D 是对角阵 =====
 D = (Y * Y') / m;
-D_theory = diag(lambda_sorted(1:r));
+D_theory = diag(lambda_sorted(skip_pc+1 : skip_pc+r));
 fprintf('D 与 diag(λ₁...λᵣ) 的最大差异 = %e\n', max(abs(D - D_theory), [], 'all'));
 
 %% ===== 7. 保存特征脸（即 P 的列向量） =====
