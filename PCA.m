@@ -1,105 +1,136 @@
 % PCA
+% =========================================================================
+% 【新方案】预处理已移至 face_align_augment.m 脚本
+% 请先运行 face_align_augment.m 完成人脸对齐+数据增强，再运行本脚本。
+% 本脚本直接从 Face_neo 读取已经对齐、增强好的 60×60 灰度图。
+%
+% 如果新方案效果不好，想恢复旧代码：
+%   1. 删除本段新代码（到 "旧预处理代码结束" 标记为止）
+%   2. 取消下方旧代码的注释
+% =========================================================================
 
-file_list = dir('D:\Linear_algebra\Face\Face_old\*.jpg');
+%% ===== 新方案：直接从 Face_neo 读取已处理好的图片 =====
 output_folder = 'D:\Linear_algebra\Face\Face_neo';
-eigen_folder = 'D:\Linear_algebra\Face\Eigenfaces';
-% ===== 清空输出文件夹，防止重复累积 =====
-if exist(output_folder, 'dir')
-    % 方法1：删除文件夹内所有文件和子文件夹（速度较快）
-    delete(fullfile(output_folder, '*'));   % 删除所有文件
-    % 如果有子文件夹也可以一并删除（根据需要取消注释下一行）
-    % rmdir(fullfile(output_folder, '*'), 's');
-    fprintf('已清空输出文件夹: %s\n', output_folder);
-else
-    % 如果文件夹不存在，则创建
-    mkdir(output_folder);
-    fprintf('已创建输出文件夹: %s\n', output_folder);
-end
+eigen_folder  = 'D:\Linear_algebra\Face\Eigenfaces';
 
+% 清空特征脸文件夹
 if exist(eigen_folder, 'dir')
-    % 方法1：删除文件夹内所有文件和子文件夹（速度较快）
-    delete(fullfile(eigen_folder, '*'));   % 删除所有文件
-    % 如果有子文件夹也可以一并删除（根据需要取消注释下一行）
-    % rmdir(fullfile(output_folder, '*'), 's');
+    delete(fullfile(eigen_folder, '*'));
     fprintf('已清空特征脸文件夹: %s\n', eigen_folder);
 else
-    % 如果文件夹不存在，则创建
     mkdir(eigen_folder);
     fprintf('已创建特征脸文件夹: %s\n', eigen_folder);
 end
 
-
-
+% 从 Face_neo 读取所有已处理的图片（face_align_augment.m 的输出）
+file_list = dir(fullfile(output_folder, '*.jpg'));
 n = length(file_list);
+fprintf('从 Face_neo 读取到 %d 张已处理图片\n', n);
 
-images = cell(1, n);
-PR_of_images = cell(1, n);
-PG_of_images = cell(1, n);
-PB_of_images = cell(1, n);
-RAW_gray_images = cell(1, n);
-Gauss_filtered = cell(1, n);
+if n == 0
+    error('Face_neo 文件夹为空！请先运行 face_align_augment.m 进行预处理。');
+end
+
 Resized_images = cell(1, n);
-Gauss_filtered_Resized_images = cell(1,n);
+valid_count = 0;
 
-valid_count = 0;  % 记录成功处理的图片数量
-
-% ---- 循环批量处理 ----
 for i = 1:n
     filepath = fullfile(file_list(i).folder, file_list(i).name);
-    
     try
         img = imread(filepath);
-        
-        % 检查是否为彩色图（3通道）
-        if size(img, 3) < 3
-            fprintf('⚠️ 跳过非彩色图: %s\n', file_list(i).name);
-            continue;  % 跳过本次循环，进入下一张
+        % Face_neo 中的图片已经是 60×60 灰度图
+        if size(img, 3) == 3
+            img = uint8(0.299*double(img(:,:,1)) + ...
+                        0.587*double(img(:,:,2)) + ...
+                        0.114*double(img(:,:,3)));
         end
-        
+        % 确保尺寸正确
+        if size(img,1) ~= 60 || size(img,2) ~= 60
+            img = imresize(img, [60, 60]);
+        end
         valid_count = valid_count + 1;
-        
-        images{valid_count} = img;
-        
-        % ===== 这里是你原来的 bug =====
-        % 你之前没有给 PR/PG/PB 赋值就直接用了
-        % 需要先提取分量，再做灰度化
-        PR_of_images{valid_count} = double(img(:,:,1));
-        PG_of_images{valid_count} = double(img(:,:,2));
-        PB_of_images{valid_count} = double(img(:,:,3));
-        
-        % 加权灰度化
-        RAW_gray_images{valid_count} = uint8( ...
-            0.299 * PR_of_images{valid_count} + ...
-            0.587 * PG_of_images{valid_count} + ...
-            0.114 * PB_of_images{valid_count});
-        
-        % 高斯滤波
-        Gauss_filtered{valid_count} = imgaussfilt(RAW_gray_images{valid_count}, 0.3);
-        
-        % 尺寸统一化（去掉第二次高斯滤波，避免过度模糊丢失细节）
-        Resized_images{valid_count} = imresize(Gauss_filtered{valid_count}, [60, 60]);
-        % 写入D:\Linear_algebra\Face\Face_neo
-        [~, name, ~] = fileparts(file_list(i).name);
-        out_path = fullfile(output_folder, [name, '.jpg']);
-        imwrite(Resized_images{valid_count}, out_path);
-
-
-        fprintf('成功处理: %s\n', file_list(i).name);
-        
+        Resized_images{valid_count} = img;
     catch e
-        fprintf('跳过损坏图片: %s (%s)\n', file_list(i).name, e.message);
-        % 不增加 valid_count，直接进入下一张
+        fprintf('跳过: %s (%s)\n', file_list(i).name, e.message);
     end
 end
 
-% 清理空 cell
-images = images(1:valid_count);
-PR_of_images = PR_of_images(1:valid_count);
-PG_of_images = PG_of_images(1:valid_count);
-PB_of_images = PB_of_images(1:valid_count);
-RAW_gray_images = RAW_gray_images(1:valid_count);
-Gauss_filtered = Gauss_filtered(1:valid_count);
 Resized_images = Resized_images(1:valid_count);
+fprintf('成功加载 %d 张图片\n', valid_count);
+
+% =========================================================================
+% 【旧预处理代码 — 已注释保留，如需恢复请取消注释】
+% =========================================================================
+% % --- 旧方案：从 Face_old 直接读取并处理 ---
+% file_list = dir('D:\Linear_algebra\Face\Face_old\*.jpg');
+% output_folder = 'D:\Linear_algebra\Face\Face_neo';
+% eigen_folder = 'D:\Linear_algebra\Face\Eigenfaces';
+% % ===== 清空输出文件夹，防止重复累积 =====
+% if exist(output_folder, 'dir')
+%     delete(fullfile(output_folder, '*'));
+%     fprintf('已清空输出文件夹: %s\n', output_folder);
+% else
+%     mkdir(output_folder);
+%     fprintf('已创建输出文件夹: %s\n', output_folder);
+% end
+%
+% if exist(eigen_folder, 'dir')
+%     delete(fullfile(eigen_folder, '*'));
+%     fprintf('已清空特征脸文件夹: %s\n', eigen_folder);
+% else
+%     mkdir(eigen_folder);
+%     fprintf('已创建特征脸文件夹: %s\n', eigen_folder);
+% end
+%
+% n = length(file_list);
+%
+% images = cell(1, n);
+% PR_of_images = cell(1, n);
+% PG_of_images = cell(1, n);
+% PB_of_images = cell(1, n);
+% RAW_gray_images = cell(1, n);
+% Gauss_filtered = cell(1, n);
+% Resized_images = cell(1, n);
+% Gauss_filtered_Resized_images = cell(1,n);
+%
+% valid_count = 0;
+%
+% for i = 1:n
+%     filepath = fullfile(file_list(i).folder, file_list(i).name);
+%     try
+%         img = imread(filepath);
+%         if size(img, 3) < 3
+%             fprintf('⚠️ 跳过非彩色图: %s\n', file_list(i).name);
+%             continue;
+%         end
+%         valid_count = valid_count + 1;
+%         images{valid_count} = img;
+%         PR_of_images{valid_count} = double(img(:,:,1));
+%         PG_of_images{valid_count} = double(img(:,:,2));
+%         PB_of_images{valid_count} = double(img(:,:,3));
+%         RAW_gray_images{valid_count} = uint8( ...
+%             0.299 * PR_of_images{valid_count} + ...
+%             0.587 * PG_of_images{valid_count} + ...
+%             0.114 * PB_of_images{valid_count});
+%         Gauss_filtered{valid_count} = imgaussfilt(RAW_gray_images{valid_count}, 0.3);
+%         Resized_images{valid_count} = imresize(Gauss_filtered{valid_count}, [60, 60]);
+%         [~, name, ~] = fileparts(file_list(i).name);
+%         out_path = fullfile(output_folder, [name, '.jpg']);
+%         imwrite(Resized_images{valid_count}, out_path);
+%         fprintf('成功处理: %s\n', file_list(i).name);
+%     catch e
+%         fprintf('跳过损坏图片: %s (%s)\n', file_list(i).name, e.message);
+%     end
+% end
+%
+% images = images(1:valid_count);
+% PR_of_images = PR_of_images(1:valid_count);
+% PG_of_images = PG_of_images(1:valid_count);
+% PB_of_images = PB_of_images(1:valid_count);
+% RAW_gray_images = RAW_gray_images(1:valid_count);
+% Gauss_filtered = Gauss_filtered(1:valid_count);
+% Resized_images = Resized_images(1:valid_count);
+% % --- 旧预处理代码结束 ---
 
 %% ===== 1. 准备中心化数据 X =====
 data_matrix = zeros(60*60, valid_count);
